@@ -1,19 +1,14 @@
 """
 DECLAN ENGINE - Main Entry Point
-Sprint 1 + Sprint 2: Structure + Liquidity Engine
+Sprint 1 + 2 + 3: Structure + Liquidity + Candle Pressure
 
-Institutional Synthetic Indices Context Engine
 Declan Trader | Porciento Trading
 """
 
 from data.sample_generator import generate_boom_crash_data
-from structure_engine import (
-    SwingDetector, StructureClassifier,
-    BOSCHOCHDetector, DisplacementDetector
-)
-from liquidity_engine import (
-    EqualLevelsDetector, SweepDetector, InducementDetector
-)
+from structure_engine import SwingDetector, StructureClassifier, BOSCHOCHDetector, DisplacementDetector
+from liquidity_engine import EqualLevelsDetector, SweepDetector, InducementDetector
+from candle_engine import PressureAnalyzer, MomentumDetector, CompressionDetector
 
 
 def analyze(instrument: str = 'BOOM1000', n_candles: int = 300):
@@ -23,79 +18,86 @@ def analyze(instrument: str = 'BOOM1000', n_candles: int = 300):
 
     df = generate_boom_crash_data(n_candles, instrument)
 
-    # --- Sprint 1: Structure ---
+    # Sprint 1 — Structure
     sd = SwingDetector(left_bars=3, right_bars=3)
-    swing_highs, swing_lows = sd.get_swing_list(df)
-
+    sh, sl = sd.get_swing_list(df)
     sc = StructureClassifier()
-    structure_points = sc.classify(swing_highs, swing_lows)
-    summary = sc.get_structure_summary(structure_points)
-
+    sp = sc.classify(sh, sl)
+    sm = sc.get_structure_summary(sp)
     bd = BOSCHOCHDetector()
-    events = bd.detect(df, structure_points)
-    ev_sum = bd.get_events_summary(events)
-
+    events = bd.detect(df, sp)
+    ev = bd.get_events_summary(events)
     dd = DisplacementDetector()
-    displacements = dd.detect(df)
-    recent_disp = dd.get_recent_displacement(displacements, lookback=15)
+    disps = dd.detect(df)
+    rd = dd.get_recent_displacement(disps, lookback=15)
 
     print(f"\n  [ESTRUCTURA]")
-    print(f"  Bias : {summary['bias'].upper()}")
-    print(f"  HH:{summary['hh_count']} HL:{summary['hl_count']} "
-          f"LH:{summary['lh_count']} LL:{summary['ll_count']}")
-    print(f"  BOS:{ev_sum['bos']} | CHOCH:{ev_sum['choch']}", end="")
-    if ev_sum['last']:
-        e = ev_sum['last']
-        print(f" | Último: {e.event_type} {e.direction.upper()} [{e.significance}]")
+    print(f"  Bias: {sm['bias'].upper()} | HH:{sm['hh_count']} HL:{sm['hl_count']} LH:{sm['lh_count']} LL:{sm['ll_count']}")
+    print(f"  BOS:{ev['bos']} CHOCH:{ev['choch']}", end="")
+    if ev['last']:
+        e = ev['last']
+        print(f" | {e.event_type} {e.direction.upper()} [{e.significance}]")
+    else:
+        print()
+    if rd:
+        d = rd[-1]
+        print(f"  Desplaz: {d.direction.upper()} [{d.quality}] body={d.body_ratio:.0%} {d.range_vs_atr:.1f}xATR")
+
+    # Sprint 2 — Liquidity
+    eld = EqualLevelsDetector()
+    eql = eld.detect(df, sh, sl)
+    ls  = eld.get_summary(eql)
+    swd = SweepDetector()
+    swp = swd.detect_from_swings(df, sh, sl)
+    ss  = swd.get_summary(swp)
+    rswp = swd.get_recent_sweeps(swp, lookback=20)
+    ind = InducementDetector()
+    izs = ind.detect(df, events, disps)
+    iz  = ind.get_summary(izs)
+
+    print(f"\n  [LIQUIDEZ]")
+    print(f"  EqLevels: Activos:{ls['active']} Premium:{ls['premium']} Barridos:{ls['swept']}")
+    print(f"  Sweeps: Total:{ss['total']} Premium:{ss['premium']}", end="")
+    if rswp:
+        s = rswp[-1]
+        print(f" | {s.sweep_type.upper()} [{s.sweep_quality}] → {s.probable_direction.upper()}")
+    else:
+        print()
+    print(f"  Inducement: Total:{iz['total']} Premium:{iz['premium']}", end="")
+    if iz['last']:
+        z = iz['last']
+        print(f" | {z.inducement_type} [{z.trap_quality}] → {z.probable_move.upper()}")
     else:
         print()
 
-    if recent_disp:
-        d = recent_disp[-1]
-        print(f"  Desplaz: {d.direction.upper()} [{d.quality}] "
-              f"body={d.body_ratio:.0%} {d.range_vs_atr:.1f}xATR")
+    # Sprint 3 — Candle Pressure
+    pa   = PressureAnalyzer(window_size=5)
+    rdgs = pa.analyze_all(df)
+    wp   = pa.get_current_pressure(df, rdgs)
+    md   = MomentumDetector(window=6)
+    msts = md.detect(df)
+    mom  = md.get_current(msts)
+    cd   = CompressionDetector()
+    csts = cd.detect(df)
+    cmp  = cd.get_summary(csts)
 
-    # --- Sprint 2: Liquidity ---
-    eld = EqualLevelsDetector(atr_multiplier=0.10, min_touches=2)
-    eq_levels = eld.detect(df, swing_highs, swing_lows)
-    liq_sum = eld.get_summary(eq_levels)
+    print(f"\n  [PRESIÓN DE VELAS]")
+    print(f"  Presión: {wp.dominant_side.upper()} [{wp.quality}] "
+          f"score={wp.net_pressure:+.2f} consistencia={wp.consistency:.0%}")
+    print(f"  Tendencia presión: {wp.pressure_trend.upper()}", end="")
+    if wp.absorption_detected: print(" | ABSORCIÓN detectada", end="")
+    if wp.rejection_detected:  print(" | RECHAZO detectado", end="")
+    print()
 
-    sweep_det = SweepDetector()
-    sweeps = sweep_det.detect_from_swings(df, swing_highs, swing_lows)
-    sweep_sum = sweep_det.get_summary(sweeps)
-    recent_sweeps = sweep_det.get_recent_sweeps(sweeps, lookback=20)
+    if mom:
+        print(f"  Momentum: {mom.state.upper()} decay={mom.decay_score:.0%}", end="")
+        if mom.exhaustion_signal: print(" ⚠ AGOTAMIENTO", end="")
+        print()
 
-    ind_det = InducementDetector()
-    inducements = ind_det.detect(df, events, displacements)
-    ind_sum = ind_det.get_summary(inducements)
-
-    print(f"\n  [LIQUIDEZ]")
-    print(f"  Equal Levels — Activos:{liq_sum['active']} "
-          f"(EH:{liq_sum['equal_highs_active']} EL:{liq_sum['equal_lows_active']}) "
-          f"Premium:{liq_sum['premium']} Barridos:{liq_sum['swept']}")
-
-    if liq_sum['nearest_high']:
-        nh = liq_sum['nearest_high']
-        print(f"  EqualHigh más reciente: {nh.price:.2f} "
-              f"[{nh.touches} toques | {nh.quality_label}]")
-    if liq_sum['nearest_low']:
-        nl = liq_sum['nearest_low']
-        print(f"  EqualLow más reciente : {nl.price:.2f} "
-              f"[{nl.touches} toques | {nl.quality_label}]")
-
-    print(f"\n  Sweeps — Total:{sweep_sum['total']} "
-          f"Premium:{sweep_sum['premium']} "
-          f"(SH:{sweep_sum.get('sweep_highs',0)} SL:{sweep_sum.get('sweep_lows',0)})")
-    if recent_sweeps:
-        s = recent_sweeps[-1]
-        print(f"  Último sweep: {s.sweep_type.upper()} @ {s.level_swept:.2f} "
-              f"[{s.sweep_quality}] → probable: {s.probable_direction.upper()}")
-
-    print(f"\n  Inducement — Total:{ind_sum['total']} Premium:{ind_sum['premium']}")
-    if ind_sum['last']:
-        iz = ind_sum['last']
-        print(f"  Último: {iz.inducement_type} @ bar {iz.bar_index} "
-              f"[{iz.trap_quality}] → move: {iz.probable_move.upper()}")
+    print(f"  Compresión: {'SÍ' if cmp['compressed'] else 'NO'} "
+          f"[{cmp['quality']}] score={cmp.get('score', 0):.0%}", end="")
+    if cmp.get('breakout_pending'): print(" ⚡ BREAKOUT PENDIENTE", end="")
+    print()
 
     print(f"\n{'='*55}\n")
 
