@@ -1,6 +1,6 @@
 """
 DECLAN ENGINE - Main Entry Point
-Sprint 1 + 2 + 3: Structure + Liquidity + Candle Pressure
+Sprint 1+2+3+4: Structure + Liquidity + Candle Pressure + Probability
 
 Declan Trader | Porciento Trading
 """
@@ -9,6 +9,7 @@ from data.sample_generator import generate_boom_crash_data
 from structure_engine import SwingDetector, StructureClassifier, BOSCHOCHDetector, DisplacementDetector
 from liquidity_engine import EqualLevelsDetector, SweepDetector, InducementDetector
 from candle_engine import PressureAnalyzer, MomentumDetector, CompressionDetector
+from probability_engine import ProbabilityEngine
 
 
 def analyze(instrument: str = 'BOOM1000', n_candles: int = 300):
@@ -19,17 +20,17 @@ def analyze(instrument: str = 'BOOM1000', n_candles: int = 300):
     df = generate_boom_crash_data(n_candles, instrument)
 
     # Sprint 1 — Structure
-    sd = SwingDetector(left_bars=3, right_bars=3)
+    sd   = SwingDetector(left_bars=3, right_bars=3)
     sh, sl = sd.get_swing_list(df)
-    sc = StructureClassifier()
-    sp = sc.classify(sh, sl)
-    sm = sc.get_structure_summary(sp)
-    bd = BOSCHOCHDetector()
-    events = bd.detect(df, sp)
-    ev = bd.get_events_summary(events)
-    dd = DisplacementDetector()
-    disps = dd.detect(df)
-    rd = dd.get_recent_displacement(disps, lookback=15)
+    sc   = StructureClassifier()
+    sp   = sc.classify(sh, sl)
+    sm   = sc.get_structure_summary(sp)
+    bd   = BOSCHOCHDetector()
+    evts = bd.detect(df, sp)
+    ev   = bd.get_events_summary(evts)
+    dd   = DisplacementDetector()
+    dsps = dd.detect(df)
+    rd   = dd.get_recent_displacement(dsps, lookback=15)
 
     print(f"\n  [ESTRUCTURA]")
     print(f"  Bias: {sm['bias'].upper()} | HH:{sm['hh_count']} HL:{sm['hl_count']} LH:{sm['lh_count']} LL:{sm['ll_count']}")
@@ -44,16 +45,16 @@ def analyze(instrument: str = 'BOOM1000', n_candles: int = 300):
         print(f"  Desplaz: {d.direction.upper()} [{d.quality}] body={d.body_ratio:.0%} {d.range_vs_atr:.1f}xATR")
 
     # Sprint 2 — Liquidity
-    eld = EqualLevelsDetector()
-    eql = eld.detect(df, sh, sl)
-    ls  = eld.get_summary(eql)
-    swd = SweepDetector()
-    swp = swd.detect_from_swings(df, sh, sl)
-    ss  = swd.get_summary(swp)
+    eld  = EqualLevelsDetector()
+    eql  = eld.detect(df, sh, sl)
+    ls   = eld.get_summary(eql)
+    swd  = SweepDetector()
+    swp  = swd.detect_from_swings(df, sh, sl)
+    ss   = swd.get_summary(swp)
     rswp = swd.get_recent_sweeps(swp, lookback=20)
-    ind = InducementDetector()
-    izs = ind.detect(df, events, disps)
-    iz  = ind.get_summary(izs)
+    ind  = InducementDetector()
+    izs  = ind.detect(df, evts, dsps)
+    iz   = ind.get_summary(izs)
 
     print(f"\n  [LIQUIDEZ]")
     print(f"  EqLevels: Activos:{ls['active']} Premium:{ls['premium']} Barridos:{ls['swept']}")
@@ -82,23 +83,31 @@ def analyze(instrument: str = 'BOOM1000', n_candles: int = 300):
     cmp  = cd.get_summary(csts)
 
     print(f"\n  [PRESIÓN DE VELAS]")
-    print(f"  Presión: {wp.dominant_side.upper()} [{wp.quality}] "
-          f"score={wp.net_pressure:+.2f} consistencia={wp.consistency:.0%}")
-    print(f"  Tendencia presión: {wp.pressure_trend.upper()}", end="")
-    if wp.absorption_detected: print(" | ABSORCIÓN detectada", end="")
-    if wp.rejection_detected:  print(" | RECHAZO detectado", end="")
+    print(f"  Presión: {wp.dominant_side.upper()} [{wp.quality}] score={wp.net_pressure:+.2f} consistencia={wp.consistency:.0%}")
+    print(f"  Momentum: {mom.state.upper() if mom else 'N/A'}", end="")
+    if mom and mom.exhaustion_signal: print(" ⚠ AGOTAMIENTO", end="")
     print()
-
-    if mom:
-        print(f"  Momentum: {mom.state.upper()} decay={mom.decay_score:.0%}", end="")
-        if mom.exhaustion_signal: print(" ⚠ AGOTAMIENTO", end="")
-        print()
-
-    print(f"  Compresión: {'SÍ' if cmp['compressed'] else 'NO'} "
-          f"[{cmp['quality']}] score={cmp.get('score', 0):.0%}", end="")
+    print(f"  Compresión: {'SÍ' if cmp['compressed'] else 'NO'} [{cmp['quality']}]", end="")
     if cmp.get('breakout_pending'): print(" ⚡ BREAKOUT PENDIENTE", end="")
     print()
 
+    # Sprint 4 — Probability
+    pe = ProbabilityEngine(instrument=instrument, min_score=60.0)
+    score = pe.calculate(
+        structure_summary   = sm,
+        events_summary      = ev,
+        liquidity_summary   = ls,
+        sweep_summary       = ss,
+        inducement_summary  = iz,
+        window_pressure     = wp,
+        momentum_state      = mom,
+        compression_state   = cmp,
+        recent_displacement = rd,
+        recent_sweeps       = rswp,
+    )
+
+    print(f"\n  [PROBABILIDAD]")
+    print(pe.format_output(score))
     print(f"\n{'='*55}\n")
 
 
