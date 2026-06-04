@@ -1,11 +1,12 @@
 """
 DECLAN ENGINE - Live Analysis
-Análisis con datos reales de Deriv/MT5 + Decision Engine
+Análisis con datos reales de Deriv/MT5 + Decision Engine + HTF Analysis
 
 Uso:
     python live.py
     python live.py CRASH1000
     python live.py BOOM1000 M15
+    python live.py BOOM1000 M5 --debug
 """
 
 import sys
@@ -16,9 +17,11 @@ from liquidity_engine import EqualLevelsDetector, SweepDetector, InducementDetec
 from candle_engine import PressureAnalyzer, MomentumDetector, CompressionDetector
 from probability_engine import ProbabilityEngine
 from decision_engine import DecisionEngine, OutputFormatter
+from mtf_engine import HTFAnalyzer
 
 
-def run_analysis(df, instrument: str, timeframe: str):
+def run_analysis(df, instrument: str, timeframe: str, debug: bool = False,
+                 htf_df=None):
     """Corre el engine completo sobre un DataFrame OHLC con Decision Engine."""
 
     # ── Sprint 1 — Structure Engine ────────────────────────────────
@@ -67,6 +70,39 @@ def run_analysis(df, instrument: str, timeframe: str):
         recent_displacement=rd, recent_sweeps=rswp,
     )
 
+    # ── MTF Engine — HTF Analysis ──────────────────────────────────
+    htf_result = None
+
+    if htf_df is not None:
+        # Real HTF analysis from MT5 data
+        htf_analyzer = HTFAnalyzer(htf_timeframe=_get_htf_timeframe(timeframe))
+        htf_result = htf_analyzer.analyze_from_dataframes(df, htf_df)
+    else:
+        # Fallback: simulated HTF
+        htf_n_candles = max(len(df) // 3, 100)
+        htf_sim_df = generate_boom_crash_data(htf_n_candles, instrument, seed=99)
+        htf_analyzer = HTFAnalyzer(htf_timeframe=_get_htf_timeframe(timeframe))
+        htf_result = htf_analyzer.analyze_from_dataframes(df, htf_sim_df)
+
+    # Recalcular probability con HTF real
+    if htf_result and htf_result.alignment_score is not None:
+        score = pe.calculate(
+            structure_summary=sm, events_summary=ev,
+            liquidity_summary=ls, sweep_summary=ss,
+            inducement_summary=iz, window_pressure=wp,
+            momentum_state=mom, compression_state=cmp,
+            recent_displacement=rd, recent_sweeps=rswp,
+            htf_alignment_score=htf_result.alignment_score,
+        )
+
+    if debug and htf_result:
+        print(f"\n── HTF Analysis ({htf_analyzer.htf_timeframe}) ──")
+        print(f"  Bias: {htf_result.htf_bias}")
+        print(f"  Strength: {htf_result.htf_strength:.2f}")
+        print(f"  Alignment: {htf_result.alignment} ({htf_result.alignment_score:.2f})")
+        print(f"  Narrative: {htf_result.narrative}")
+        print()
+
     # ── Decision Engine ────────────────────────────────────────────
     last_event_type = ev['last'].event_type if ev['last'] else ''
     last_event_sig = ev['last'].significance if ev['last'] else ''
@@ -86,6 +122,11 @@ def run_analysis(df, instrument: str, timeframe: str):
     current_price = df['close'].iloc[-1]
 
     active_levels = eld.get_active_levels(eql)
+
+    # Add HTF liquidity levels for TP2
+    htf_liquidity = htf_result.htf_liquidity_levels if htf_result else []
+    all_liquidity_levels = list(active_levels) + htf_liquidity
+
     swing_highs = sh['price'].tolist() if len(sh) > 0 else []
     swing_lows = sl['price'].tolist() if len(sl) > 0 else []
 
@@ -125,12 +166,13 @@ def run_analysis(df, instrument: str, timeframe: str):
         rejection_detected=wp.rejection_detected,
         rejection_quality=rejection_quality,
         liquidity_score=score.liquidity_score,
-        active_equal_levels=active_levels,
+        active_equal_levels=all_liquidity_levels,
         recent_swing_highs=swing_highs,
         recent_swing_lows=swing_lows,
         current_price=current_price,
         atr=atr,
         df=df,
+        htf_bias=htf_result.htf_bias if htf_result else None,
     )
 
     # ── OUTPUT (Trader-Facing) ─────────────────────────────────────
@@ -141,11 +183,28 @@ def run_analysis(df, instrument: str, timeframe: str):
     tf_line = f"  Temporalidad: {timeframe} | Barras: {len(df)}"
     if 'time' in df.columns:
         tf_line += f" | Última: {df['time'].iloc[-1]}"
-    output = output.replace("=" * 55, "=" * 55, 1)
     # Insert timeframe info after header
     lines = output.split('\n')
     lines.insert(2, tf_line)
     print('\n'.join(lines))
+
+    # Debug output
+    if debug:
+        print(formatter.format_debug(decision))
+        print(f"\n── Probability Engine ──")
+        print(pe.format_output(score))
+
+
+def _get_htf_timeframe(ltf: str) -> str:
+    """Determina el HTF apropiado para el timeframe operativo dado."""
+    htf_map = {
+        'M1': 'M15',
+        'M5': 'H1',
+        'M15': 'H4',
+        'M30': 'H4',
+        'H1': 'D1',
+    }
+    return htf_map.get(ltf, 'H1')
 
 
 def _compute_current_atr(df, period: int = 14) -> float:
@@ -168,29 +227,35 @@ def _compute_current_atr(df, period: int = 14) -> float:
 
 
 def main():
-    instrument = sys.argv[1].upper() if len(sys.argv) > 1 else 'BOOM1000'
-    timeframe  = sys.argv[2].upper() if len(sys.argv) > 2 else 'M5'
-    n_bars     = int(sys.argv[3])    if len(sys.argv) > 3 else 300
+    instrument = sys.argv[1].upper() if len(sys.argv) > 1 and not sys.argv[1].startswith('--') else 'BOOM1000'
+    timeframe  = sys.argv[2].upper() if len(sys.argv) > 2 and not sys.argv[2].startswith('--') else 'M5'
+    n_bars     = int(sys.argv[3])    if len(sys.argv) > 3 and not sys.argv[3].startswith('--') else 300
+    debug      = '--debug' in sys.argv
 
     print(f"\n  Intentando conectar con MT5...")
     connector = MT5Connector()
 
     if connector.connect():
         df = connector.get_ohlc(instrument, timeframe, n_bars)
+
+        # Try to get HTF data from MT5
+        htf_timeframe = _get_htf_timeframe(timeframe)
+        htf_df = connector.get_ohlc(instrument, htf_timeframe, n_bars // 2)
+
         connector.disconnect()
 
         if df is not None:
-            run_analysis(df, instrument, timeframe)
+            run_analysis(df, instrument, timeframe, debug=debug, htf_df=htf_df)
         else:
             print(f"\n  ⚠ No se pudo obtener datos de MT5.")
             print(f"  Usando datos simulados para {instrument}...\n")
             df = generate_boom_crash_data(n_bars, instrument)
             df['time'] = df['time'].astype(str)
-            run_analysis(df, instrument, timeframe)
+            run_analysis(df, instrument, timeframe, debug=debug)
     else:
         print(f"\n  MT5 no disponible. Usando datos simulados...\n")
         df = generate_boom_crash_data(n_bars, instrument)
-        run_analysis(df, instrument, timeframe)
+        run_analysis(df, instrument, timeframe, debug=debug)
 
 
 if __name__ == "__main__":

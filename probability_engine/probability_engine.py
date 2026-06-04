@@ -80,6 +80,7 @@ class ProbabilityEngine:
         compression_state,
         recent_displacement: list,
         recent_sweeps:       list,
+        htf_alignment_score: float = None,
     ) -> ProbabilityScore:
 
         ps = ProbabilityScore(
@@ -171,20 +172,30 @@ class ProbabilityEngine:
 
         ps.momentum_score = round(ms, 3)
 
-        # ── 5. MTF SCORE (simulado en Sprint 4, real en Sprint 5) ─────────
-        # Por ahora usa estructura + momentum como proxy de alineación HTF/LTF
+        # ── 5. MTF SCORE ──────────────────────────────────────────────
+        # Ahora soporta HTF real a través del parámetro htf_alignment_score.
+        # Si no se proporciona, usa el proxy original (estructura + momentum).
         mtf = 0.0
-        if bias != 'neutral' and momentum_state:
-            bias_match = (
-                (bias == 'bullish' and momentum_state.state in ('accelerating', 'stable'))
-                or
-                (bias == 'bearish' and momentum_state.state in ('accelerating', 'stable'))
-            )
-            mtf = 0.70 if bias_match else 0.35
+        if htf_alignment_score is not None:
+            # HTF real — usar el alignment score del HTFAnalyzer
+            mtf = htf_alignment_score
+            if htf_alignment_score >= 0.70:
+                reasons.append("HTF alineado — confluencia temporal")
+            elif htf_alignment_score < 0.30:
+                reasons.append("Conflicto HTF/LTF — precaución")
+        else:
+            # Fallback: proxy de alineación HTF/LTF (sin datos HTF reales)
+            if bias != 'neutral' and momentum_state:
+                bias_match = (
+                    (bias == 'bullish' and momentum_state.state in ('accelerating', 'stable'))
+                    or
+                    (bias == 'bearish' and momentum_state.state in ('accelerating', 'stable'))
+                )
+                mtf = 0.70 if bias_match else 0.35
 
-        if compression_state and compression_state.get('breakout_pending'):
-            mtf = max(mtf, 0.65)
-            reasons.append("⚡ Compresión extrema — breakout pendiente")
+            if compression_state and compression_state.get('breakout_pending'):
+                mtf = max(mtf, 0.65)
+                reasons.append("⚡ Compresión extrema — breakout pendiente")
 
         ps.mtf_score = round(min(mtf, 1.0), 3)
 

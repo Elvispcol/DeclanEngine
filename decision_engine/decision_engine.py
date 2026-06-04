@@ -462,29 +462,65 @@ class DecisionEngine:
         """
         Formatea niveles de liquidez para el Entry Engine.
 
-        Distingue entre internal (dentro del rango operativo) y
-        external (fuera del rango estructural dominante).
+        Clasificación institutional de liquidez:
+
+        INTERNAL LIQUIDITY (TP1):
+        - Liquidez accesible dentro del rango operativo actual
+        - Recent swings, equal highs/lows internos, micro pools, imbalance fills
+        - Criterio: dentro de ~1.5% del precio actual Y en dirección del trade
+
+        EXTERNAL LIQUIDITY (TP2):
+        - Liquidez macroestructural fuera del rango dominante
+        - HTF highs/lows, major equal highs/lows, external range, major sweep zones
+        - Criterio: más allá del 1.5% del precio actual O niveles marcados como HTF/major
         """
+        # Umbral porcentual para distinguir interna de externa
+        # Basado en volatilidad típica de synthetic indices
+        internal_threshold = abs(current_price) * 0.015  # 1.5% del precio
+
         result = []
         for level in active_levels:
             if hasattr(level, 'price') and hasattr(level, 'level_type'):
                 price = level.price
                 ltype = level.level_type
-                # Internal: within ~3 ATR of current price
-                # External: beyond 3 ATR
                 distance = abs(price - current_price)
-                # Simple heuristic: use price proximity
+
+                # Levels con atributo de scope (HTF/major = siempre externo)
+                is_major = getattr(level, 'is_major', False) or getattr(level, 'htf_level', False)
+
                 if level_type == 'internal':
-                    if direction == 'bullish' and price > current_price and distance < (abs(current_price) * 0.02):
-                        result.append({'price': price, 'level_type': ltype})
-                    elif direction == 'bearish' and price < current_price and distance < (abs(current_price) * 0.02):
-                        result.append({'price': price, 'level_type': ltype})
+                    # Internal: dentro del rango operativo y en dirección del trade
+                    if direction == 'bullish' and price > current_price:
+                        if distance <= internal_threshold and not is_major:
+                            result.append({'price': price, 'level_type': ltype})
+                    elif direction == 'bearish' and price < current_price:
+                        if distance <= internal_threshold and not is_major:
+                            result.append({'price': price, 'level_type': ltype})
+
                 else:  # external
-                    if direction == 'bullish' and price > current_price and distance >= (abs(current_price) * 0.02):
-                        result.append({'price': price, 'level_type': ltype})
-                    elif direction == 'bearish' and price < current_price and distance >= (abs(current_price) * 0.02):
-                        result.append({'price': price, 'level_type': ltype})
+                    # External: fuera del rango operativo O marcados como HTF/major
+                    if direction == 'bullish' and price > current_price:
+                        if distance > internal_threshold or is_major:
+                            result.append({'price': price, 'level_type': ltype})
+                    elif direction == 'bearish' and price < current_price:
+                        if distance > internal_threshold or is_major:
+                            result.append({'price': price, 'level_type': ltype})
+
             elif isinstance(level, dict):
-                result.append(level)
+                # Dict format fallback
+                price = level.get('price', 0)
+                distance = abs(price - current_price)
+                is_major = level.get('is_major', False) or level.get('htf_level', False)
+
+                if level_type == 'internal':
+                    if direction == 'bullish' and price > current_price and distance <= internal_threshold and not is_major:
+                        result.append(level)
+                    elif direction == 'bearish' and price < current_price and distance <= internal_threshold and not is_major:
+                        result.append(level)
+                else:
+                    if direction == 'bullish' and price > current_price and (distance > internal_threshold or is_major):
+                        result.append(level)
+                    elif direction == 'bearish' and price < current_price and (distance > internal_threshold or is_major):
+                        result.append(level)
 
         return result

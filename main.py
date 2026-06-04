@@ -5,17 +5,25 @@ Decision Engine Implementation
 Motor de interpretación institucional → Decisiones operacionales para traders.
 
 Declan Trader | Porciento Trading
+
+Uso:
+    python main.py
+    python main.py BOOM1000
+    python main.py BOOM1000 --debug
+    python main.py CRASH1000 --debug
 """
 
+import sys
 from data.sample_generator import generate_boom_crash_data
 from structure_engine import SwingDetector, StructureClassifier, BOSCHOCHDetector, DisplacementDetector
 from liquidity_engine import EqualLevelsDetector, SweepDetector, InducementDetector
 from candle_engine import PressureAnalyzer, MomentumDetector, CompressionDetector
 from probability_engine import ProbabilityEngine
 from decision_engine import DecisionEngine, OutputFormatter
+from mtf_engine import HTFAnalyzer
 
 
-def analyze(instrument: str = 'BOOM1000', n_candles: int = 300):
+def analyze(instrument: str = 'BOOM1000', n_candles: int = 300, debug: bool = False):
     df = generate_boom_crash_data(n_candles, instrument)
 
     # ── Sprint 1 — Structure Engine ────────────────────────────────
@@ -69,6 +77,38 @@ def analyze(instrument: str = 'BOOM1000', n_candles: int = 300):
         recent_sweeps       = rswp,
     )
 
+    # ── MTF Engine — HTF Analysis ──────────────────────────────────
+    # Generar datos HTF simulados (en producción, vendrían de MT5)
+    htf_n_candles = max(n_candles // 3, 100)  # Menos barras en HTF
+    htf_df = generate_boom_crash_data(htf_n_candles, instrument, seed=99)
+
+    htf_analyzer = HTFAnalyzer(htf_timeframe='H1')
+    htf_result = htf_analyzer.analyze_from_dataframes(df, htf_df)
+
+    # Recalcular probability con HTF real (si hay alineación)
+    if htf_result.alignment_score is not None:
+        score = pe.calculate(
+            structure_summary   = sm,
+            events_summary      = ev,
+            liquidity_summary   = ls,
+            sweep_summary       = ss,
+            inducement_summary  = iz,
+            window_pressure     = wp,
+            momentum_state      = mom,
+            compression_state   = cmp,
+            recent_displacement = rd,
+            recent_sweeps       = rswp,
+            htf_alignment_score = htf_result.alignment_score,
+        )
+
+    if debug:
+        print(f"\n── HTF Analysis ({htf_analyzer.htf_timeframe}) ──")
+        print(f"  Bias: {htf_result.htf_bias}")
+        print(f"  Strength: {htf_result.htf_strength:.2f}")
+        print(f"  Alignment: {htf_result.alignment} ({htf_result.alignment_score:.2f})")
+        print(f"  Narrative: {htf_result.narrative}")
+        print()
+
     # ── Decision Engine ────────────────────────────────────────────
     # Extract data needed for Decision Engine
     last_event_type = ev['last'].event_type if ev['last'] else ''
@@ -94,6 +134,10 @@ def analyze(instrument: str = 'BOOM1000', n_candles: int = 300):
 
     # Active equal levels for TP calculation
     active_levels = eld.get_active_levels(eql)
+
+    # Add HTF liquidity levels to active levels for TP2 calculation
+    htf_liquidity = htf_result.htf_liquidity_levels
+    all_liquidity_levels = list(active_levels) + htf_liquidity
 
     # Recent swing highs/lows for SL
     swing_highs = sh['price'].tolist() if len(sh) > 0 else []
@@ -136,20 +180,24 @@ def analyze(instrument: str = 'BOOM1000', n_candles: int = 300):
         rejection_detected=wp.rejection_detected,
         rejection_quality=rejection_quality,
         liquidity_score=score.liquidity_score,
-        active_equal_levels=active_levels,
+        active_equal_levels=all_liquidity_levels,
         recent_swing_highs=swing_highs,
         recent_swing_lows=swing_lows,
         current_price=current_price,
         atr=atr,
         df=df,
+        htf_bias=htf_result.htf_bias,
     )
 
     # ── OUTPUT (Trader-Facing) ─────────────────────────────────────
     formatter = OutputFormatter()
     print(formatter.format(decision, instrument))
 
-    # Debug output (optional — descomentar para desarrollo)
-    # print(formatter.format_debug(decision))
+    # Debug output
+    if debug:
+        print(formatter.format_debug(decision))
+        print(f"\n── Probability Engine ──")
+        print(pe.format_output(score))
 
 
 def _compute_current_atr(df, period: int = 14) -> float:
@@ -172,5 +220,9 @@ def _compute_current_atr(df, period: int = 14) -> float:
 
 
 if __name__ == "__main__":
-    analyze('BOOM1000')
-    analyze('CRASH1000')
+    instrument = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith('--') else 'BOOM1000'
+    debug = '--debug' in sys.argv
+
+    analyze(instrument, debug=debug)
+    if instrument == 'BOOM1000':
+        analyze('CRASH1000', debug=debug)

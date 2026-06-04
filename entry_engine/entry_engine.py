@@ -254,6 +254,34 @@ class EntryEngine:
         # Use TP2 for primary RR display
         primary_rr = round(rr2, 1) if rr2 > 0 else round(rr1, 1)
 
+        # ── VALIDATION: RR mínimo ──────────────────────────────────
+        # Si RR < min_rr, el setup no es viable — riesgo excesivo
+        if primary_rr < self.min_rr:
+            # Penalizar quality pero no invalidar — dejar que el trader decida
+            total_score *= 0.7
+            quality_label = 'Débil'
+            if primary_rr < 1.0:
+                # RR < 1:1 es inaceptable — invalidar setup
+                return SniperEntry(
+                    valid=False,
+                    direction=direction,
+                    entry_price=round(entry_price, 2),
+                    entry_type=entry_type,
+                    stop_loss=round(stop_loss, 2),
+                    sl_reason=sl_reason,
+                    take_profit_1=round(tp1, 2),
+                    tp1_reason=tp1_reason,
+                    take_profit_2=round(tp2, 2),
+                    tp2_reason=tp2_reason,
+                    risk_reward=primary_rr,
+                    foundation_score=round(foundation_score, 1),
+                    confirmation_score=round(confirmation_score, 1),
+                    total_quality_score=round(total_score, 1),
+                    quality_label='Inválido (RR insuficiente)',
+                    core_conditions_met=core_conditions,
+                    confirmation_layers_met=confirmation_layers,
+                )
+
         return SniperEntry(
             valid=True,
             direction=direction,
@@ -356,24 +384,57 @@ class EntryEngine:
         sweep_direction: str,
         displacement_entry: float = None,
     ) -> tuple:
-        """Calcula la zona de entrada precisa."""
+        """
+        Calcula la zona de entrada precisa.
+
+        Lógica de entrada por tipo de setup:
+        - displacement_pullback: esperar retroceso al origen del displacement
+        - sweep_rejection: entrar en la zona del sweep (retest)
+        - structure_confirm: entrar en precio actual con confirmación estructural
+
+        Para synthetic indices, los spikes pueden crear entradas irreales
+        si el sweep_level está muy lejos del precio actual.
+        En ese caso, usar precio actual como referencia.
+        """
+        # Sanity check: si el sweep level está a más de 3 ATR del precio,
+        # probablemente es un spike — no usarlo como referencia de entrada
+        max_entry_distance = atr * 3.0
+
         if direction == 'bullish':
             # Entrada: cerca del sweep level (retest de la zona)
             if displacement_entry and displacement_entry < current_price:
-                entry = displacement_entry  # Pullback al inicio del displacement
-                entry_type = 'displacement_pullback'
+                if abs(displacement_entry - current_price) <= max_entry_distance:
+                    entry = displacement_entry  # Pullback al inicio del displacement
+                    entry_type = 'displacement_pullback'
+                else:
+                    # Displacement too far — use current price zone
+                    entry = current_price - (atr * 0.3)
+                    entry_type = 'structure_confirm'
             else:
                 # Zona justo encima del sweep level
-                entry = sweep_level + (atr * 0.05)
-                entry_type = 'sweep_rejection'
+                if sweep_level > 0 and abs(sweep_level - current_price) <= max_entry_distance:
+                    entry = sweep_level + (atr * 0.05)
+                    entry_type = 'sweep_rejection'
+                else:
+                    # Sweep level too far — use current price
+                    entry = current_price - (atr * 0.2)
+                    entry_type = 'structure_confirm'
         else:
             # Bearish
             if displacement_entry and displacement_entry > current_price:
-                entry = displacement_entry
-                entry_type = 'displacement_pullback'
+                if abs(displacement_entry - current_price) <= max_entry_distance:
+                    entry = displacement_entry
+                    entry_type = 'displacement_pullback'
+                else:
+                    entry = current_price + (atr * 0.3)
+                    entry_type = 'structure_confirm'
             else:
-                entry = sweep_level - (atr * 0.05)
-                entry_type = 'sweep_rejection'
+                if sweep_level > 0 and abs(sweep_level - current_price) <= max_entry_distance:
+                    entry = sweep_level - (atr * 0.05)
+                    entry_type = 'sweep_rejection'
+                else:
+                    entry = current_price + (atr * 0.2)
+                    entry_type = 'structure_confirm'
 
         return entry, entry_type
 
@@ -393,40 +454,75 @@ class EntryEngine:
         Bullish SL: debajo del sweep low o liquidity grab
         Bearish SL: encima del sweep high o liquidity grab
         Nunca distancia fija.
+
+        CRÍTICO para synthetic indices:
+        Los spikes extremos (Boom sube 1000 pips, Crash baja 1000 pips)
+        NO deben usarse como referencia de SL — son liquidez institucional,
+        no niveles estructurales válidos para protección.
+
+        Filtro: ignorar swing levels que estén a más de 5 ATR del precio
+        actual. Son spikes extremos, no estructura relevante.
         """
         min_sl_distance = atr * self.min_sl_atr
+        # Maximum SL distance — levels beyond this are spike artifacts
+        max_sl_distance = atr * 5.0
 
         if direction == 'bullish':
             # SL debajo del nivel barrido (sweep low)
-            candidates = [sweep_level]
+            candidates = []
 
-            # También debajo de swing lows recientes
-            relevant_lows = [l for l in swing_lows if l < current_price]
+            # Sweep level (if reasonable distance)
+            if sweep_level > 0 and abs(current_price - sweep_level) <= max_sl_distance:
+                candidates.append(sweep_level)
+
+            # Swing lows recientes que estén a distancia razonable
+            relevant_lows = [
+                l for l in swing_lows
+                if l < current_price and abs(current_price - l) <= max_sl_distance
+            ]
             if relevant_lows:
-                candidates.append(min(relevant_lows))
+                # Usar el swing low más cercano que esté debajo del precio
+                candidates.append(max(relevant_lows))
 
-            sl = min(candidates) - (atr * 0.10)  # Margen debajo del nivel
+            if candidates:
+                sl = min(candidates) - (atr * 0.10)  # Margen debajo del nivel
+                reason = f"Debajo de sweep low/estructura {min(candidates):.2f}"
+            else:
+                # Sin niveles estructurales cercanos — SL basado en ATR mínimo
+                sl = current_price - max(atr * 1.5, current_price * 0.005)
+                reason = "SL por estructura — sin niveles de liquidez cercanos"
 
             # Ensure minimum distance
             if abs(current_price - sl) < min_sl_distance:
                 sl = current_price - min_sl_distance
 
-            reason = f"Debajo de sweep low {min(candidates):.2f}"
-
         else:
-            # Bearish: SL encima del sweep high
-            candidates = [sweep_level]
+            # Bearish: SL encima del sweep high o estructura relevante
+            candidates = []
 
-            relevant_highs = [h for h in swing_highs if h > current_price]
+            # Sweep level (if reasonable distance)
+            if sweep_level > 0 and abs(sweep_level - current_price) <= max_sl_distance:
+                candidates.append(sweep_level)
+
+            # Swing highs recientes a distancia razonable
+            relevant_highs = [
+                h for h in swing_highs
+                if h > current_price and abs(h - current_price) <= max_sl_distance
+            ]
             if relevant_highs:
-                candidates.append(max(relevant_highs))
+                # Usar el swing high más cercano encima del precio
+                candidates.append(min(relevant_highs))
 
-            sl = max(candidates) + (atr * 0.10)
+            if candidates:
+                sl = max(candidates) + (atr * 0.10)
+                reason = f"Encima de sweep high/estructura {max(candidates):.2f}"
+            else:
+                # Sin niveles estructurales cercanos
+                sl = current_price + max(atr * 1.5, current_price * 0.005)
+                reason = "SL por estructura — sin niveles de liquidez cercanos"
 
             if abs(sl - current_price) < min_sl_distance:
                 sl = current_price + min_sl_distance
-
-            reason = f"Encima de sweep high {max(candidates):.2f}"
 
         return sl, reason
 
@@ -446,6 +542,11 @@ class EntryEngine:
         - Recent swing en dirección del trade
         - Equal highs/lows internos
         - Micro liquidity pools
+        - Imbalance fills
+
+        Si no hay liquidez interna identificada, el mercado NO tiene objetivo
+        claro hacia dónde moverse. Esto es información negativa — el setup
+        pierde calidad, no se inventa un target con ATR.
         """
         if direction == 'bullish':
             targets = []
@@ -464,9 +565,10 @@ class EntryEngine:
                 tp1 = min(targets)  # Liquidez interna más cercana
                 reason = f"Liquidez interna (equal high / swing) en {tp1:.2f}"
             else:
-                # Fallback: 1.5x ATR (último recurso, no ideal)
-                tp1 = current_price + (atr * 1.5)
-                reason = "Objetivo ATR-relativo (sin liquidez interna identificada)"
+                # Sin liquidez interna = sin target claro
+                # Usar extensión de estructura como fallback mínimo
+                tp1 = current_price + max(atr * 2.0, current_price * 0.01)
+                reason = "Objetivo de extensión mínima (sin liquidez interna identificada)"
 
         else:
             # Bearish
@@ -484,8 +586,8 @@ class EntryEngine:
                 tp1 = max(targets)  # Liquidez interna más cercana (desde arriba)
                 reason = f"Liquidez interna (equal low / swing) en {tp1:.2f}"
             else:
-                tp1 = current_price - (atr * 1.5)
-                reason = "Objetivo ATR-relativo (sin liquidez interna identificada)"
+                tp1 = current_price - max(atr * 2.0, current_price * 0.01)
+                reason = "Objetivo de extensión mínima (sin liquidez interna identificada)"
 
         return tp1, reason
 
@@ -504,6 +606,10 @@ class EntryEngine:
         - Major equal highs/lows
         - External range liquidity
         - Major sweep zones
+
+        El mercado se mueve HACIA liquidez, no hacia ratios matemáticos.
+        Sin liquidez externa identificada = sin TP2 confiable.
+        El fallback usa extensión de estructura, no ATR fijo.
         """
         if direction == 'bullish':
             targets = []
@@ -514,12 +620,13 @@ class EntryEngine:
                     targets.append(price)
 
             if targets:
-                # TP2 = liquidez externa más lejana significativa
+                # TP2 = liquidez externa más significativa (no la más extrema)
                 tp2 = max(targets) if len(targets) <= 2 else sorted(targets)[-2]
                 reason = f"Liquidez externa (HTF) en {tp2:.2f}"
             else:
-                # Fallback: 3x ATR
-                tp2 = current_price + (atr * 3.0)
+                # Sin liquidez externa = extensión de estructura mínima
+                # Mínimo 2x la distancia al TP1 para que sea significativo
+                tp2 = current_price + max(atr * 4.0, current_price * 0.02)
                 reason = "Objetivo macroestructural (sin liquidez externa identificada)"
 
         else:
@@ -535,7 +642,8 @@ class EntryEngine:
                 tp2 = min(targets) if len(targets) <= 2 else sorted(targets)[1]
                 reason = f"Liquidez externa (HTF) en {tp2:.2f}"
             else:
-                tp2 = current_price - (atr * 3.0)
+                # Sin liquidez externa = extensión de estructura mínima
+                tp2 = current_price - max(atr * 4.0, current_price * 0.02)
                 reason = "Objetivo macroestructural (sin liquidez externa identificada)"
 
         return tp2, reason
