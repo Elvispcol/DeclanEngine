@@ -85,6 +85,14 @@ class BOSCHOCHDetector:
 
         current_bias = self._compute_initial_bias(structure_points)
 
+        # Trackear niveles ya rotos para no repetir eventos en el mismo nivel
+        broken_high_levels: set = set()
+        broken_low_levels: set = set()
+
+        # Índice actual de swing relevante (se actualiza al romperse)
+        last_used_high_idx = -1
+        last_used_low_idx = -1
+
         # Iterar por cada candle buscando rupturas
         for i in range(1, len(df)):
             close = closes[i]
@@ -94,17 +102,25 @@ class BOSCHOCHDetector:
             body = abs(close - opens[i])
             body_ratio = body / candle_range if candle_range > 0 else 0
 
+            if body_ratio < self.min_body_ratio:
+                continue
+
             # --- Buscar ruptura de swing high ---
-            relevant_highs = [p for p in swing_highs if p.bar_index < i]
+            relevant_highs = [
+                p for p in swing_highs
+                if p.bar_index < i and p.bar_index > last_used_high_idx
+            ]
             if relevant_highs:
-                last_swing_high = max(relevant_highs, key=lambda x: x.bar_index)
-                level = last_swing_high.price
+                # Solo el swing high más reciente no roto
+                candidate = max(relevant_highs, key=lambda x: x.bar_index)
+                level = candidate.price
+                level_key = round(level, 5)
 
                 broke_above = (
                     close > level if self.require_close_beyond else high > level
                 )
 
-                if broke_above and body_ratio >= self.min_body_ratio:
+                if broke_above and level_key not in broken_high_levels:
                     event_type = 'BOS' if current_bias == 'bullish' else 'CHOCH'
                     significance = self._score_significance(body_ratio, close - level, df, i)
 
@@ -118,20 +134,28 @@ class BOSCHOCHDetector:
                         body_ratio=round(body_ratio, 3)
                     ))
 
+                    broken_high_levels.add(level_key)
+                    last_used_high_idx = candidate.bar_index
+
                     if event_type == 'CHOCH':
                         current_bias = 'bullish'
+                        broken_low_levels.clear()  # Bias cambió, reset low levels
 
             # --- Buscar ruptura de swing low ---
-            relevant_lows = [p for p in swing_lows if p.bar_index < i]
+            relevant_lows = [
+                p for p in swing_lows
+                if p.bar_index < i and p.bar_index > last_used_low_idx
+            ]
             if relevant_lows:
-                last_swing_low = max(relevant_lows, key=lambda x: x.bar_index)
-                level = last_swing_low.price
+                candidate = max(relevant_lows, key=lambda x: x.bar_index)
+                level = candidate.price
+                level_key = round(level, 5)
 
                 broke_below = (
                     close < level if self.require_close_beyond else low < level
                 )
 
-                if broke_below and body_ratio >= self.min_body_ratio:
+                if broke_below and level_key not in broken_low_levels:
                     event_type = 'BOS' if current_bias == 'bearish' else 'CHOCH'
                     significance = self._score_significance(body_ratio, level - close, df, i)
 
@@ -145,8 +169,12 @@ class BOSCHOCHDetector:
                         body_ratio=round(body_ratio, 3)
                     ))
 
+                    broken_low_levels.add(level_key)
+                    last_used_low_idx = candidate.bar_index
+
                     if event_type == 'CHOCH':
                         current_bias = 'bearish'
+                        broken_high_levels.clear()  # Bias cambió, reset high levels
 
         return events
 

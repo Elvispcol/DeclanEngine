@@ -30,36 +30,51 @@ def generate_boom_crash_data(
     -------
     DataFrame con columnas: ['time', 'open', 'high', 'low', 'close', 'instrument']
     """
-    np.random.seed(seed)
+    # Seed diferente por instrumento para comportamiento único
+    instrument_seeds = {
+        'BOOM1000': seed,
+        'BOOM500': seed + 7,
+        'CRASH1000': seed + 13,
+        'CRASH500': seed + 19,
+    }
+    np.random.seed(instrument_seeds.get(instrument, seed))
 
     base_price = 10000.0
     prices = [base_price]
-    
-    # Generar precio base con ciclos
+
+    is_boom = instrument.startswith('BOOM')
+    is_crash = instrument.startswith('CRASH')
+    is_fast = '500' in instrument   # 500 = más volátil, reversiones más rápidas
+
+    # Parámetros por tipo de instrumento
+    spike_prob     = 0.025 if is_fast else 0.015
+    spike_mag      = 0.018 if is_fast else 0.013
+    trend_strength = 0.0025 if not is_fast else 0.0035
+
     phase_length = n_candles // 4
-    
+
     for i in range(1, n_candles):
         phase = (i // phase_length) % 4
-        
+
         if phase == 0:   # Acumulación
             drift = 0.0001
-            vol = 0.003
+            vol = 0.003 if not is_fast else 0.005
         elif phase == 1:  # Markup
-            drift = 0.002
+            drift = trend_strength if is_boom else -trend_strength * 0.5
             vol = 0.004
         elif phase == 2:  # Distribución
-            drift = 0.0002
-            vol = 0.005
+            drift = 0.0002 if is_boom else -0.0003
+            vol = 0.005 if not is_fast else 0.007
         else:             # Markdown
-            drift = -0.002
+            drift = -trend_strength * 0.5 if is_boom else -trend_strength
             vol = 0.004
 
-        # Spike ocasional para Boom/Crash
+        # Spikes: BOOM sube, CRASH baja
         spike = 0
-        if instrument.startswith('BOOM') and np.random.random() < 0.02:
-            spike = abs(np.random.normal(0, 0.015))
-        elif instrument.startswith('CRASH') and np.random.random() < 0.02:
-            spike = -abs(np.random.normal(0, 0.015))
+        if is_boom and np.random.random() < spike_prob:
+            spike = abs(np.random.normal(0, spike_mag))
+        elif is_crash and np.random.random() < spike_prob:
+            spike = -abs(np.random.normal(0, spike_mag))
 
         change = drift + np.random.normal(0, vol) + spike
         new_price = prices[-1] * (1 + change)
